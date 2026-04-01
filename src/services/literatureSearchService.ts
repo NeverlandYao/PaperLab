@@ -4,8 +4,15 @@ const SEMANTIC_SCHOLAR_API = 'https://api.semanticscholar.org/graph/v1/paper/sea
 const ARXIV_API = 'https://export.arxiv.org/api/query';
 const SERPER_SCHOLAR_API = 'https://google.serper.dev/scholar';
 
-interface SearchCandidate extends PaperDraft {
+export interface SearchCandidate extends PaperDraft {
   citationCount: number;
+}
+
+export function hasResolvableSource(paper: Pick<PaperDraft, 'doi' | 'sourceUrl' | 'fullTextUrl' | 'title'>): boolean {
+  if (paper.sourceUrl && /^https?:\/\//i.test(paper.sourceUrl)) return true;
+  if (paper.fullTextUrl && /^https?:\/\//i.test(paper.fullTextUrl)) return true;
+  if (isLikelyDoi(paper.doi)) return true;
+  return Boolean(paper.title.trim());
 }
 
 function normalizeWhitespace(text: string): string {
@@ -108,11 +115,11 @@ export function buildSubQueries(topic: string): string[] {
   return templates.slice(0, 5);
 }
 
-async function searchSemanticScholar(topic: string, query: string, limit = 4): Promise<SearchCandidate[]> {
+export async function searchSemanticScholar(topic: string, query: string, limit = 4): Promise<SearchCandidate[]> {
   const params = new URLSearchParams({
     query,
     limit: String(limit),
-    fields: 'title,year,authors,journal,abstract,citationCount,externalIds,venue',
+    fields: 'title,year,authors,journal,abstract,citationCount,externalIds,venue,url,openAccessPdf',
   });
 
   const apiKey = import.meta.env.VITE_SEMANTIC_SCHOLAR_API_KEY;
@@ -174,7 +181,7 @@ function extractArxivPdfUrl(entry: Element): string | undefined {
   return href || undefined;
 }
 
-async function searchArxiv(topic: string, query: string, limit = 4): Promise<SearchCandidate[]> {
+export async function searchArxiv(topic: string, query: string, limit = 4): Promise<SearchCandidate[]> {
   const params = new URLSearchParams({
     search_query: `all:${query}`,
     start: '0',
@@ -220,7 +227,7 @@ async function searchArxiv(topic: string, query: string, limit = 4): Promise<Sea
     .filter((item): item is SearchCandidate => Boolean(item));
 }
 
-async function searchSerperScholar(topic: string, query: string, limit = 4): Promise<SearchCandidate[]> {
+export async function searchSerperScholar(topic: string, query: string, limit = 4): Promise<SearchCandidate[]> {
   const apiKey = import.meta.env.VITE_SERPER_API_KEY;
   if (!apiKey) return [];
 
@@ -274,7 +281,7 @@ async function searchSerperScholar(topic: string, query: string, limit = 4): Pro
     .filter((item): item is SearchCandidate => Boolean(item));
 }
 
-function dedupeAndRank(candidates: SearchCandidate[]): SearchCandidate[] {
+export function dedupeAndRank(candidates: SearchCandidate[]): SearchCandidate[] {
   const map = new Map<string, SearchCandidate>();
 
   for (const paper of candidates) {
@@ -293,12 +300,15 @@ function dedupeAndRank(candidates: SearchCandidate[]): SearchCandidate[] {
     if (b.citationCount !== a.citationCount) return b.citationCount - a.citationCount;
     if (a.doi === 'N/A' && b.doi !== 'N/A') return 1;
     if (b.doi === 'N/A' && a.doi !== 'N/A') return -1;
+    const aHasDirect = Number(Boolean(a.sourceUrl || a.fullTextUrl));
+    const bHasDirect = Number(Boolean(b.sourceUrl || b.fullTextUrl));
+    if (bHasDirect !== aHasDirect) return bHasDirect - aHasDirect;
     return b.year - a.year;
   });
 }
 
-export async function multiSourceSearch(topic: string): Promise<PaperDraft[]> {
-  const subQueries = buildSubQueries(topic).slice(0, 5);
+export async function multiSourceSearch(topic: string, queries?: string[]): Promise<PaperDraft[]> {
+  const subQueries = (queries ?? buildSubQueries(topic)).slice(0, 5);
   if (subQueries.length === 0) return [];
 
   const tasks = subQueries.flatMap((query) => [
@@ -312,7 +322,7 @@ export async function multiSourceSearch(topic: string): Promise<PaperDraft[]> {
     .filter((result): result is PromiseFulfilledResult<SearchCandidate[]> => result.status === 'fulfilled')
     .flatMap((result) => result.value);
 
-  const ranked = dedupeAndRank(merged).slice(0, 8);
+  const ranked = dedupeAndRank(merged).filter(hasResolvableSource).slice(0, 8);
 
   return ranked.map(({ citationCount: _citationCount, ...paper }) => paper);
 }

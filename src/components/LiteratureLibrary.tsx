@@ -149,14 +149,7 @@ export default function LiteratureLibrary({ papers, onRemovePaper, onAddPaper }:
     setError(null);
 
     try {
-      let textContent = '';
-      try {
-        textContent = await file.text();
-      } catch {
-        textContent = `Uploaded file: ${file.name}`;
-      }
-
-      const metadata = await extractPaperMetadata(file.name, textContent || `Uploaded file: ${file.name}`);
+      const metadata = await extractPaperMetadata(file);
       onAddPaper({ ...metadata, id: createPaperId('upload') });
     } catch (err) {
       const appError = normalizeError(err, '文献上传解析失败，请稍后重试。');

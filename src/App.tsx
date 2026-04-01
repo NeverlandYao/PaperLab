@@ -44,7 +44,6 @@ export default function App() {
               </div>
               <div>
                 <h1 className="font-headline text-xl font-bold tracking-tight">PaperLab</h1>
-                <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted">Intelligence Studio</p>
               </div>
             </div>
             <p className="text-xs leading-relaxed text-muted">面向研究者的科研工作台</p>
@@ -91,7 +90,7 @@ export default function App() {
                 <Layers className="h-4 w-4" />
                 <p className="text-[11px] font-semibold uppercase tracking-wider">Upcoming Modules</p>
               </div>
-              <p className="text-xs text-muted">Knowledge Graph, Method Benchmark, Citation QA</p>
+              <p className="text-xs text-muted">Knowledge Graph, Method Benchmark</p>
             </div>
           </div>
 

@@ -1,7 +1,7 @@
 import { GoogleGenAI, Type } from '@google/genai';
 import { AppError } from '../lib/appError';
-import type { Paper, PaperDraft, PaperTier } from '../types';
-import { multiSourceSearch } from './literatureSearchService';
+import type { Paper, PaperDraft, PaperTier, ThemeAnalysis } from '../types';
+import { buildSubQueries } from './literatureSearchService';
 
 const MODEL_NAME = 'gemini-3-flash-preview';
 
@@ -141,234 +141,222 @@ function getResponseText(text: string | undefined): string {
   return text;
 }
 
-function buildFallbackPapers(topic: string): Paper[] {
-  const year = new Date().getFullYear();
-  const base: PaperDraft[] = [
-    {
-      title: `${topic}（离线模式占位文献 1）`,
-      authors: 'Unknown',
-      year: year - 1,
-      journal: 'Offline Placeholder',
-      tier: 'Q4',
-      doi: 'N/A',
-      abstract: `当前网络或检索源不可用，系统为“${topic}”生成了离线占位文献。`,
-      abstractZh: `当前网络或检索源不可用，系统为“${topic}”生成了离线占位文献。`,
-      abstractEn: `The network or literature source is unavailable. Offline placeholder papers were generated for "${topic}".`,
-      tags: [topic, 'offline', 'placeholder'],
-    },
-    {
-      title: `${topic}（离线模式占位文献 2）`,
-      authors: 'Unknown',
-      year: year - 2,
-      journal: 'Offline Placeholder',
-      tier: 'Q4',
-      doi: 'N/A',
-      abstract: `离线占位文献用于保障工作流不中断，请在网络正常后重新检索以获取真实 DOI。`,
-      abstractZh: `离线占位文献用于保障工作流不中断，请在网络正常后重新检索以获取真实 DOI。`,
-      abstractEn: `Offline placeholders keep the workflow running. Please retry later to fetch real papers and DOIs.`,
-      tags: [topic, 'offline', 'retry'],
-    },
-    {
-      title: `${topic}（离线模式占位文献 3）`,
-      authors: 'Unknown',
-      year: year - 3,
-      journal: 'Offline Placeholder',
-      tier: 'Q4',
-      doi: 'N/A',
-      abstract: `建议启用网络后再次执行检索，系统将优先返回 Semantic Scholar、arXiv 与 Google Scholar 的真实结果。`,
-      abstractZh: `建议启用网络后再次执行检索，系统将优先返回 Semantic Scholar、arXiv 与 Google Scholar 的真实结果。`,
-      abstractEn: `Run search again with network access. The system will prioritize Semantic Scholar, arXiv, and Google Scholar results.`,
-      tags: [topic, 'network-required', 'real-search'],
-    },
-  ];
-
-  return base.map((paper, index) => toPaperWithId(paper, index));
-}
-
-function buildFallbackReview(topic: string, papers: Paper[]): string {
-  const references = papers
-    .map(
-      (paper) =>
-        `${paper.authors} (${paper.year}). ${paper.title}. *${paper.journal}*. https://doi.org/${paper.doi}`,
-    )
-    .join('\n');
-
-  return `# 文献综述：${topic}
-
-## 1. 引言 (Introduction)
-本综述围绕“${topic}”梳理当前研究进展，重点关注方法框架、评估体系与应用可行性。
-
-## 2. 核心主题分析 (Thematic Analysis)
-现有研究主要集中在三条主线：证据整合框架、方法性能对比和应用场景拓展。多数工作显示，模型性能与数据质量、任务定义和评估标准高度相关。
-
-## 3. 研究方法论评述 (Methodological Review)
-在方法层面，相关文献广泛采用实验对比与消融分析，但在跨数据集泛化与长期鲁棒性评估方面仍有不足。
-
-## 4. 未来研究方向 (Future Directions)
-后续研究可优先推进：统一评估协议、提升可解释性、构建跨场景可迁移方案，并强化伦理与合规设计。
-
-## 5. 结论 (Conclusion)
-总体而言，${topic} 研究已形成较清晰的方法谱系，但在标准化评估与真实部署验证方面仍存在显著提升空间。
-
-## 参考文献 (References)
-${references}`;
-}
-
-export async function performDeepResearch(topic: string): Promise<Paper[]> {
-  try {
-    const sourcePapers = await multiSourceSearch(topic);
-    if (sourcePapers.length > 0) {
-      return sourcePapers.map((paper, index) => toPaperWithId(paper, index));
-    }
-  } catch {
-    // ignore and continue to model fallback
-  }
-
+/**
+ * Use Gemini to generate optimized English academic search queries for any topic,
+ * including Chinese-language topics that would otherwise fail in English-only APIs.
+ */
+export async function buildSearchQueries(topic: string): Promise<string[]> {
   try {
     const response = await getAiClient().models.generateContent({
       model: MODEL_NAME,
-      contents: `你是一个资深科研助手。请针对主题 "${topic}" 进行深度研究规划。
-    你需要模拟以下多智能体协作过程：
-    1. **Search Agent**: 在 Google Scholar, Web of Science, PubMed 等数据库中检索近 5-10 年的核心文献。
-    2. **Evaluation Agent**: 基于期刊影响力 (JCR 分区 Q1/Q2)、被引频次及研究方法论的严谨性进行筛选。
-    3. **Extraction Agent**: 深度解析每篇文献的 Abstract, Methodology 和 Key Findings。
-
-    请输出一个包含 5-8 篇精选核心文献的 JSON 数组，每篇必须包含：
-    - title: 论文标题
-    - authors: 作者列表 (格式如: Zhang, Y., & Li, M.)
-    - year: 发表年份
-    - journal: 期刊名称
-    - tier: JCR 分区 (Q1 或 Q2)
-    - doi: 真实的或高度模拟的 DOI (如: 10.1016/j.future.2023.01.001)
-    - abstractZh: 中文摘要 (150-200字)，涵盖背景、方法和结论
-    - abstractEn: 英文摘要 (120-180 words)，与中文摘要语义一致
-    - tags: 3-5 个学术关键词
-    `,
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              title: { type: Type.STRING },
-              authors: { type: Type.STRING },
-              year: { type: Type.NUMBER },
-              journal: { type: Type.STRING },
-              tier: { type: Type.STRING },
-              doi: { type: Type.STRING },
-              abstract: { type: Type.STRING },
-              abstractZh: { type: Type.STRING },
-              abstractEn: { type: Type.STRING },
-              tags: { type: Type.ARRAY, items: { type: Type.STRING } },
-            },
-            required: [
-              'title',
-              'authors',
-              'year',
-              'journal',
-              'tier',
-              'doi',
-              'abstractZh',
-              'abstractEn',
-              'tags',
-            ],
-          },
-        },
-      },
+      contents: `你是学术检索专家。针对研究主题「${topic}」，生成 5 个英文学术数据库搜索短语。
+要求：
+- 每个短语 3-6 个英文单词
+- 分别覆盖：系统性综述、核心方法、最新进展、应用场景、研究挑战
+- 适合在 Semantic Scholar 与 arXiv 使用
+- 仅输出 JSON 字符串数组，不要解释`,
+      config: { responseMimeType: 'application/json' },
     });
-
-    const payload = parseJson(getResponseText(response.text));
-    if (!Array.isArray(payload)) {
-      throw new AppError('AI_RESPONSE_INVALID', '文献列表格式异常，请重试。');
-    }
-
-    if (payload.length === 0) {
-      throw new AppError('AI_RESPONSE_INVALID', '未检索到有效文献，请更换主题后重试。');
-    }
-
-    return payload.map((item, index) => toPaperWithId(parsePaperDraft(item), index));
-  } catch {
-    return buildFallbackPapers(topic);
-  }
+    const raw = JSON.parse(response.text ?? '[]');
+    const queries = Array.isArray(raw) ? (raw as unknown[]).filter((q): q is string => typeof q === 'string') : [];
+    if (queries.length >= 3) return queries.slice(0, 5);
+  } catch {}
+  return buildSubQueries(topic);
 }
 
-export async function generateApaReview(topic: string, papers: Paper[]): Promise<string> {
+/**
+ * Analyst role (DeerFlow): extract themes, methods, controversies from real papers.
+ * Returns null silently on any failure — the Reporter can still write without it.
+ */
+export async function analyzeThemes(topic: string, papers: Paper[]): Promise<ThemeAnalysis | null> {
   try {
+    const paperTitles = papers
+      .map((p) => `- ${p.authors} (${p.year}): ${p.title} [${p.journal}]`)
+      .join('\n');
+
     const response = await getAiClient().models.generateContent({
       model: MODEL_NAME,
-      contents: `你是一个专业的学术作家。请基于提供的文献数据，撰写一篇关于 "${topic}" 的高质量文献综述。
+      contents: `分析以下关于「${topic}」的 ${papers.length} 篇真实文献，识别跨文献的学术规律。
 
-    要求：
-    1. **语言**: 使用严谨、专业的学术中文。
-    2. **格式**: 严格遵循 APA 第七版 (APA 7th Edition) 引用规范。
-    3. **文中引用**: 必须在正文中恰当地引用所有提供的文献 (例如: Zhang & Li, 2023; Wang et al., 2022)。
-    4. **结构**:
-       - # 文献综述：[主题名称]
-       - ## 1. 引言 (Introduction): 阐述研究背景、重要性及本综述的范围。
-       - ## 2. 核心主题分析 (Thematic Analysis): 归纳各文献的共同发现、争议点及研究趋势。
-       - ## 3. 研究方法论评述 (Methodological Review): 评价现有研究的方法优劣。
-       - ## 4. 未来研究方向 (Future Directions): 基于现有文献指出研究空白。
-       - ## 5. 结论 (Conclusion): 总结核心观点。
-       - ## 参考文献 (References): 按照 APA 规范列出所有引用的文献，并附上 DOI 链接。
+文献列表：
+${paperTitles}
 
-    文献数据：${JSON.stringify(papers)}`,
-    });
-
-    return getResponseText(response.text);
-  } catch {
-    return buildFallbackReview(topic, papers);
-  }
-}
-
-export async function extractPaperMetadata(fileName: string, content: string): Promise<PaperDraft> {
-  try {
-    const response = await getAiClient().models.generateContent({
-      model: MODEL_NAME,
-      contents: `分析以下上传的文献内容（文件名：${fileName}），提取其元数据：
-    内容：${content.substring(0, 5000)}
-
-    请输出 JSON：title, authors, year, journal, tier(预测其分区), doi, abstractZh, abstractEn, tags(3-5个)。
-    若原文只有单语内容，也必须补全双语摘要（保证两种语言都存在）。`,
+请输出 JSON，包含：
+- themes: 3-5 个核心研究主题（英文短语）
+- methods: 文献中使用的主要研究方法类型
+- controversies: 学界存在的争议点或相互矛盾的发现
+- gaps: 尚未解决的研究空白`,
       config: {
         responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
           properties: {
-            title: { type: Type.STRING },
-            authors: { type: Type.STRING },
-            year: { type: Type.NUMBER },
-            journal: { type: Type.STRING },
-            tier: { type: Type.STRING },
-            doi: { type: Type.STRING },
-            abstract: { type: Type.STRING },
-            abstractZh: { type: Type.STRING },
-            abstractEn: { type: Type.STRING },
-            tags: { type: Type.ARRAY, items: { type: Type.STRING } },
+            themes: { type: Type.ARRAY, items: { type: Type.STRING } },
+            methods: { type: Type.ARRAY, items: { type: Type.STRING } },
+            controversies: { type: Type.ARRAY, items: { type: Type.STRING } },
+            gaps: { type: Type.ARRAY, items: { type: Type.STRING } },
           },
         },
       },
     });
 
-    const payload = parseJson(getResponseText(response.text));
-    const paper = parsePaperDraft(payload);
-
+    const raw = JSON.parse(response.text ?? 'null') as Record<string, unknown> | null;
+    if (!raw) return null;
     return {
-      ...paper,
-      tier: normalizeTier(paper.tier, 'Q4'),
+      themes: Array.isArray(raw.themes) ? (raw.themes as string[]) : [],
+      methods: Array.isArray(raw.methods) ? (raw.methods as string[]) : [],
+      controversies: Array.isArray(raw.controversies) ? (raw.controversies as string[]) : [],
+      gaps: Array.isArray(raw.gaps) ? (raw.gaps as string[]) : [],
     };
   } catch {
-    return {
-      title: fileName.replace(/\.[^/.]+$/, '') || '未命名文献',
-      authors: 'Unknown',
-      year: new Date().getFullYear(),
-      journal: 'Unspecified Source',
-      tier: 'Q4',
-      doi: 'N/A',
-      abstract: '无法从上传内容中自动提取摘要，已生成占位信息。',
-      abstractZh: '无法从上传内容中自动提取摘要，已生成占位信息。',
-      abstractEn: 'Failed to extract abstract from the uploaded content. Placeholder metadata was generated.',
-      tags: ['uploaded', 'metadata-pending'],
-    };
+    return null;
   }
+}
+
+export async function generateApaReview(
+  topic: string,
+  papers: Paper[],
+  analysis?: ThemeAnalysis | null,
+): Promise<string> {
+  const paperList = papers
+    .map(
+      (p, i) =>
+        `[${i + 1}] ${p.authors} (${p.year}). ${p.title}. ${p.journal}.${p.doi !== 'N/A' ? ` https://doi.org/${p.doi}` : ''}\n摘要：${p.abstractEn || p.abstract}`,
+    )
+    .join('\n\n');
+
+  const analysisSection = analysis
+    ? `
+**预分析结果（Analyst Agent 输出，请在综述中系统性覆盖这些主题）：**
+- 核心研究主题：${analysis.themes.join('；')}
+- 主要研究方法：${analysis.methods.join('；')}
+- 争议与分歧：${analysis.controversies.join('；') || '暂无明显争议'}
+- 研究空白：${analysis.gaps.join('；') || '待进一步分析'}
+`
+    : '';
+
+  const response = await getAiClient().models.generateContent({
+    model: MODEL_NAME,
+    contents: `你是一位资深学术作者，专攻系统性文献综述写作。请基于下方 ${papers.length} 篇真实文献，撰写关于「${topic}」的高质量中文学术综述。
+${analysisSection}
+**写作要求：**
+1. 语言：严谨、专业的学术中文，避免口语化。
+2. 引用格式：严格遵循 APA 第七版，正文引用格式 (Author, Year) 或 (Author et al., Year)，所有文献必须至少引用一次。
+3. 只能引用下方列表中的文献，禁止引用列表外的任何来源。
+4. 综合而非罗列：跨文献比较、整合、提炼规律与分歧，体现批判性思维。
+5. 字数：正文各章节合计不少于 1500 字。
+
+**文章结构（严格按此 Markdown 标题格式输出）：**
+
+# 文献综述：${topic}
+
+## 1. 引言
+阐述研究背景与现实意义，说明本综述的范围与方法。
+
+## 2. 理论框架与核心概念
+梳理关键理论、模型或概念体系，比较不同学者的定义与分类。
+
+## 3. 研究现状与主题分析
+跨文献综合分析：主要发现、学术共识、争议焦点、演进趋势（按主题分小节）。
+
+## 4. 研究方法论评述
+评价现有研究的数据来源、实验设计、评估指标的优势与局限。
+
+## 5. 研究空白与未来方向
+明确指出 3-5 个尚待解决的核心问题及未来优先方向。
+
+## 6. 结论
+简洁总结本领域进展、主要贡献与挑战。
+
+## 参考文献
+按 APA 第七版格式列出所有文献，有 DOI 的附完整 DOI 链接。
+
+---
+**可引用的文献列表（仅限此列表）：**
+${paperList}`,
+  });
+
+  return getResponseText(response.text);
+}
+
+const METADATA_SCHEMA = {
+  responseMimeType: 'application/json',
+  responseSchema: {
+    type: Type.OBJECT,
+    properties: {
+      title: { type: Type.STRING },
+      authors: { type: Type.STRING },
+      year: { type: Type.NUMBER },
+      journal: { type: Type.STRING },
+      tier: { type: Type.STRING },
+      doi: { type: Type.STRING },
+      abstract: { type: Type.STRING },
+      abstractZh: { type: Type.STRING },
+      abstractEn: { type: Type.STRING },
+      tags: { type: Type.ARRAY, items: { type: Type.STRING } },
+    },
+  },
+} as const;
+
+const METADATA_PROMPT = (fileName: string) =>
+  `你是一个专业的文献元数据提取助手。请从提供的文献内容（文件名：${fileName}）中准确提取：
+title（论文标题）、authors（作者，格式如 Zhang, Y.; Li, M.）、year（发表年份，整数）、
+journal（期刊/会议名称）、tier（预测 JCR 分区 Q1-Q4）、
+doi（仅填真实 DOI，不确定填 "N/A"）、
+abstractZh（150-200字中文摘要，包含背景、方法、结论）、
+abstractEn（120-180词英文摘要，与中文语义一致）、
+tags（3-5个学术关键词数组）。
+若原文只有单语，必须同时补全另一种语言的摘要。`;
+
+async function runMetadataExtraction(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  contents: any,
+): Promise<PaperDraft> {
+  const response = await getAiClient().models.generateContent({
+    model: MODEL_NAME,
+    contents,
+    config: METADATA_SCHEMA,
+  });
+  const payload = parseJson(getResponseText(response.text));
+  const paper = parsePaperDraft(payload);
+  return { ...paper, tier: normalizeTier(paper.tier, 'Q4') };
+}
+
+export async function extractPaperMetadata(file: File): Promise<PaperDraft> {
+  const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+  const promptText = METADATA_PROMPT(file.name);
+
+  if (isPdf) {
+    // Send the full PDF as base64 inline data — Gemini can parse PDF natively
+    const arrayBuffer = await file.arrayBuffer();
+    const bytes = new Uint8Array(arrayBuffer);
+    let binary = '';
+    // Process in chunks to avoid call-stack overflow on large files
+    const CHUNK = 8192;
+    for (let i = 0; i < bytes.byteLength; i += CHUNK) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+    }
+    const base64 = btoa(binary);
+
+    return runMetadataExtraction([
+      {
+        parts: [
+          { inlineData: { mimeType: 'application/pdf', data: base64 } },
+          { text: promptText },
+        ],
+      },
+    ]);
+  }
+
+  // Text / Markdown / DOCX (plain text extraction)
+  let textContent = '';
+  try {
+    textContent = await file.text();
+  } catch {
+    textContent = '';
+  }
+
+  return runMetadataExtraction(
+    `${promptText}\n\n文献正文（前 6000 字）：\n${textContent.substring(0, 6000)}`,
+  );
 }
